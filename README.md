@@ -1,6 +1,6 @@
 # Lucid Stock Telegram Alert
 
-This GitHub Actions bot checks monitored stock tickers every five minutes and sends a Telegram message when a latest price is below its configured lower trigger or above its configured upper trigger.
+This GitHub Actions bot checks monitored stock tickers every 30 seconds while its scheduled GitHub Actions run is active, and sends a Telegram message when a latest price is below its configured lower trigger or above its configured upper trigger.
 
 ## Setup
 
@@ -70,4 +70,4 @@ LOWER_PRICE_THRESHOLD=5
 UPPER_PRICE_THRESHOLD=
 ```
 
-GitHub scheduled workflows use a five-minute cron because that is GitHub Actions' shortest supported schedule interval. Runs can be delayed by GitHub, so this is best for lightweight alerts, not real-time trading automation.
+GitHub scheduled workflows use a five-minute cron because that is GitHub Actions' shortest supported schedule interval. Each scheduled run performs 10 monitoring cycles with 30 seconds between cycles. Runs can still be delayed by GitHub, so this is best for lightweight alerts, not real-time trading automation.
