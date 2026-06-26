@@ -8,7 +8,7 @@ on:
       stock_symbol:
         description: "Stock symbol to check"
         required: false
-        default: "LCID"
+        default: ""
       lower_price_threshold:
         description: "Alert when the stock price is below this value"
         required: false
@@ -43,12 +43,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check LCID price and send Telegram alert
+      - name: Check stock prices and send Telegram alerts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CONFIG_PATH: config/stock_alert.json
-          STOCK_SYMBOL: ${{ inputs.stock_symbol || 'LCID' }}
+          STOCK_SYMBOL: ${{ inputs.stock_symbol || '' }}
           LOWER_PRICE_THRESHOLD: ${{ inputs.lower_price_threshold || '' }}
           UPPER_PRICE_THRESHOLD: ${{ inputs.upper_price_threshold || '' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}

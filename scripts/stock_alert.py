@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a stock price and send Telegram alerts with Telegram-configured thresholds."""
+"""Check stock prices and send Telegram alerts with Telegram-configured monitors."""
 
 from __future__ import annotations
 
@@ -9,16 +9,17 @@ import re
 import sys
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/{method}"
 DEFAULT_CONFIG_PATH = "config/stock_alert.json"
+SYMBOL_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9.-]{0,14}")
 
 
 @dataclass(frozen=True)
@@ -31,10 +32,19 @@ class Quote:
 
 
 @dataclass
-class AlertConfig:
-    stock_symbol: str = "LCID"
-    lower_threshold: Decimal | None = Decimal("5")
+class StockMonitor:
+    symbol: str
+    lower_threshold: Decimal | None = None
     upper_threshold: Decimal | None = None
+
+
+@dataclass
+class AlertConfig:
+    stocks: dict[str, StockMonitor] = field(
+        default_factory=lambda: {
+            "LCID": StockMonitor(symbol="LCID", lower_threshold=Decimal("5")),
+        }
+    )
     telegram_update_offset: int | None = None
 
 
@@ -60,6 +70,13 @@ def optional_decimal_from_env(name: str) -> Decimal | None:
         return Decimal(str(raw_value))
     except InvalidOperation:
         raise SystemExit(f"{name} must be a valid decimal number, got {raw_value!r}")
+
+
+def normalize_symbol(raw_symbol: str) -> str:
+    symbol = raw_symbol.strip().lstrip("$").upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError("Use a stock ticker like LCID, AAPL, TSLA, or BRK-B.")
+    return symbol
 
 
 def fetch_json(url: str, data: bytes | None = None) -> dict[str, Any]:
@@ -94,7 +111,7 @@ def fetch_quote(symbol: str) -> Quote:
     chart = payload.get("chart", {})
     error = chart.get("error")
     if error:
-        raise RuntimeError(f"Quote provider returned an error: {error}")
+        raise RuntimeError(f"Quote provider returned an error for {symbol}: {error}")
 
     result = chart.get("result") or []
     if not result:
@@ -131,41 +148,113 @@ def load_config(path: Path) -> AlertConfig:
         return AlertConfig()
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    lower = data.get("lower_threshold")
-    upper = data.get("upper_threshold")
-    return AlertConfig(
-        stock_symbol=str(data.get("stock_symbol") or "LCID").upper(),
-        lower_threshold=Decimal(str(lower)) if lower is not None else None,
-        upper_threshold=Decimal(str(upper)) if upper is not None else None,
-        telegram_update_offset=data.get("telegram_update_offset"),
-    )
+    update_offset = data.get("telegram_update_offset")
+
+    if "stocks" not in data:
+        lower = data.get("lower_threshold")
+        upper = data.get("upper_threshold")
+        symbol = str(data.get("stock_symbol") or "LCID").upper()
+        return AlertConfig(
+            stocks={
+                symbol: StockMonitor(
+                    symbol=symbol,
+                    lower_threshold=Decimal(str(lower)) if lower is not None else None,
+                    upper_threshold=Decimal(str(upper)) if upper is not None else None,
+                )
+            },
+            telegram_update_offset=update_offset,
+        )
+
+    stocks: dict[str, StockMonitor] = {}
+    for raw_symbol, raw_monitor in dict(data.get("stocks") or {}).items():
+        symbol = normalize_symbol(str(raw_symbol))
+        lower = raw_monitor.get("lower_threshold")
+        upper = raw_monitor.get("upper_threshold")
+        stocks[symbol] = StockMonitor(
+            symbol=symbol,
+            lower_threshold=Decimal(str(lower)) if lower is not None else None,
+            upper_threshold=Decimal(str(upper)) if upper is not None else None,
+        )
+
+    return AlertConfig(stocks=stocks, telegram_update_offset=update_offset)
 
 
 def save_config(path: Path, config: AlertConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
-        "stock_symbol": config.stock_symbol,
-        "lower_threshold": str(config.lower_threshold) if config.lower_threshold is not None else None,
-        "upper_threshold": str(config.upper_threshold) if config.upper_threshold is not None else None,
+        "stocks": {
+            symbol: {
+                "lower_threshold": (
+                    str(monitor.lower_threshold) if monitor.lower_threshold is not None else None
+                ),
+                "upper_threshold": (
+                    str(monitor.upper_threshold) if monitor.upper_threshold is not None else None
+                ),
+            }
+            for symbol, monitor in sorted(config.stocks.items())
+        },
         "telegram_update_offset": config.telegram_update_offset,
     }
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def build_status_message(config: AlertConfig) -> str:
-    lower = config.lower_threshold if config.lower_threshold is not None else "off"
-    upper = config.upper_threshold if config.upper_threshold is not None else "off"
+def format_trigger(value: Decimal | None) -> str:
+    return str(value) if value is not None else "off"
+
+
+def format_monitor_line(monitor: StockMonitor, quote: Quote | None = None) -> str:
+    price = f"{quote.price} {quote.currency}" if quote else "price unavailable"
     return (
-        f"{config.stock_symbol} alert settings\n"
-        f"Lower trigger: {lower}\n"
-        f"Upper trigger: {upper}\n\n"
-        "Commands:\n"
-        "/setlower 4.50\n"
-        "/setupper 8.00\n"
-        "/clearlower\n"
-        "/clearupper\n"
-        "/status"
+        f"{monitor.symbol}: {price}; "
+        f"lower {format_trigger(monitor.lower_threshold)}; "
+        f"upper {format_trigger(monitor.upper_threshold)}"
     )
+
+
+def fetch_monitored_quotes(
+    config: AlertConfig,
+    quote_fetcher: Callable[[str], Quote],
+) -> tuple[dict[str, Quote], dict[str, str]]:
+    quotes: dict[str, Quote] = {}
+    errors: dict[str, str] = {}
+    for symbol in sorted(config.stocks):
+        try:
+            quotes[symbol] = quote_fetcher(symbol)
+        except Exception as exc:
+            errors[symbol] = str(exc)
+    return quotes, errors
+
+
+def build_prices_message(
+    config: AlertConfig,
+    quote_fetcher: Callable[[str], Quote] = fetch_quote,
+    include_commands: bool = False,
+) -> str:
+    if not config.stocks:
+        return "No stocks are currently monitored. Use /add LCID to add one."
+
+    quotes, errors = fetch_monitored_quotes(config, quote_fetcher)
+    lines = ["Monitored stock prices:"]
+    for symbol, monitor in sorted(config.stocks.items()):
+        lines.append(format_monitor_line(monitor, quotes.get(symbol)))
+        if symbol in errors:
+            lines.append(f"{symbol}: quote error: {errors[symbol]}")
+
+    if include_commands:
+        lines.extend(
+            [
+                "",
+                "Commands:",
+                "/add AAPL",
+                "/add AAPL 150 220",
+                "/remove AAPL",
+                "/setlower AAPL 150",
+                "/setupper AAPL 220",
+                "/prices",
+                "/status",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def build_alert_message(quote: Quote, direction: str, threshold: Decimal) -> str:
@@ -188,43 +277,146 @@ def normalize_command(text: str) -> tuple[str, str]:
     return command, arg
 
 
-def update_config_from_command(config: AlertConfig, text: str) -> str:
+def parse_add_args(arg: str) -> tuple[str, Decimal | None, Decimal | None] | str:
+    parts = arg.split()
+    if not 1 <= len(parts) <= 3:
+        return "Usage: /add AAPL or /add AAPL 150 220"
+
+    try:
+        symbol = normalize_symbol(parts[0])
+        lower = parse_decimal(parts[1], "Lower trigger") if len(parts) >= 2 else None
+        upper = parse_decimal(parts[2], "Upper trigger") if len(parts) >= 3 else None
+    except ValueError as exc:
+        return str(exc)
+
+    if lower is not None and upper is not None and lower >= upper:
+        return "Lower trigger must be below the upper trigger."
+    return symbol, lower, upper
+
+
+def symbol_from_arg(config: AlertConfig, arg: str, command: str) -> tuple[str | None, str | None]:
+    if arg:
+        try:
+            symbol = normalize_symbol(arg.split()[0])
+        except ValueError as exc:
+            return None, str(exc)
+        if symbol not in config.stocks:
+            return None, f"{symbol} is not monitored. Use /add {symbol} first."
+        return symbol, None
+
+    if len(config.stocks) == 1:
+        return next(iter(config.stocks)), None
+    return None, f"Usage: {command} SYMBOL"
+
+
+def symbol_and_value_from_arg(
+    config: AlertConfig,
+    arg: str,
+    command: str,
+) -> tuple[str | None, Decimal | None, str | None]:
+    parts = arg.split()
+    if len(parts) == 1 and len(config.stocks) == 1:
+        symbol = next(iter(config.stocks))
+        raw_value = parts[0]
+    elif len(parts) == 2:
+        try:
+            symbol = normalize_symbol(parts[0])
+        except ValueError as exc:
+            return None, None, str(exc)
+        raw_value = parts[1]
+    else:
+        return None, None, f"Usage: {command} SYMBOL PRICE"
+
+    if symbol not in config.stocks:
+        return None, None, f"{symbol} is not monitored. Use /add {symbol} first."
+
+    try:
+        value = parse_decimal(raw_value, "Trigger")
+    except ValueError as exc:
+        return None, None, str(exc)
+    return symbol, value, None
+
+
+def update_config_from_command(
+    config: AlertConfig,
+    text: str,
+    quote_fetcher: Callable[[str], Quote] = fetch_quote,
+) -> str:
     command, arg = normalize_command(text)
 
-    if command in {"/start", "/help", "/status"}:
-        return build_status_message(config)
+    if command in {"/start", "/help", "/status", "/list"}:
+        return build_prices_message(config, quote_fetcher, include_commands=True)
+
+    if command == "/prices":
+        return build_prices_message(config, quote_fetcher)
+
+    if command in {"/add", "/addstock"}:
+        parsed = parse_add_args(arg)
+        if isinstance(parsed, str):
+            return parsed
+        symbol, lower, upper = parsed
+        try:
+            quote = quote_fetcher(symbol)
+        except Exception:
+            return f"I could not find a live quote for {symbol}. Check the ticker and try again."
+
+        canonical_symbol = normalize_symbol(quote.symbol)
+        config.stocks[canonical_symbol] = StockMonitor(
+            symbol=canonical_symbol,
+            lower_threshold=lower,
+            upper_threshold=upper,
+        )
+        return (
+            f"Added {canonical_symbol} at {quote.price} {quote.currency}.\n"
+            f"Lower trigger: {format_trigger(lower)}\n"
+            f"Upper trigger: {format_trigger(upper)}"
+        )
+
+    if command in {"/remove", "/delete", "/removestock", "/deletestock"}:
+        symbol, error = symbol_from_arg(config, arg, "/remove")
+        if error:
+            return error
+        assert symbol is not None
+        del config.stocks[symbol]
+        return f"Removed {symbol} from monitoring."
 
     if command == "/setlower":
-        if not arg:
-            return "Usage: /setlower 4.50"
-        try:
-            value = parse_decimal(arg, "Lower trigger")
-        except ValueError as exc:
-            return str(exc)
-        if config.upper_threshold is not None and value >= config.upper_threshold:
+        symbol, value, error = symbol_and_value_from_arg(config, arg, "/setlower")
+        if error:
+            return error
+        assert symbol is not None and value is not None
+        monitor = config.stocks[symbol]
+        if monitor.upper_threshold is not None and value >= monitor.upper_threshold:
             return "Lower trigger must be below the upper trigger."
-        config.lower_threshold = value
-        return f"Lower trigger set to {value}."
+        monitor.lower_threshold = value
+        return f"{symbol} lower trigger set to {value}."
 
     if command == "/setupper":
-        if not arg:
-            return "Usage: /setupper 8.00"
-        try:
-            value = parse_decimal(arg, "Upper trigger")
-        except ValueError as exc:
-            return str(exc)
-        if config.lower_threshold is not None and value <= config.lower_threshold:
+        symbol, value, error = symbol_and_value_from_arg(config, arg, "/setupper")
+        if error:
+            return error
+        assert symbol is not None and value is not None
+        monitor = config.stocks[symbol]
+        if monitor.lower_threshold is not None and value <= monitor.lower_threshold:
             return "Upper trigger must be above the lower trigger."
-        config.upper_threshold = value
-        return f"Upper trigger set to {value}."
+        monitor.upper_threshold = value
+        return f"{symbol} upper trigger set to {value}."
 
     if command == "/clearlower":
-        config.lower_threshold = None
-        return "Lower trigger cleared."
+        symbol, error = symbol_from_arg(config, arg, "/clearlower")
+        if error:
+            return error
+        assert symbol is not None
+        config.stocks[symbol].lower_threshold = None
+        return f"{symbol} lower trigger cleared."
 
     if command == "/clearupper":
-        config.upper_threshold = None
-        return "Upper trigger cleared."
+        symbol, error = symbol_from_arg(config, arg, "/clearupper")
+        if error:
+            return error
+        assert symbol is not None
+        config.stocks[symbol].upper_threshold = None
+        return f"{symbol} upper trigger cleared."
 
     if command.startswith("/"):
         return "Unknown command. Send /status to see available commands."
@@ -277,47 +469,84 @@ def process_telegram_commands(
     return changed
 
 
-def config_snapshot(config: AlertConfig) -> tuple[str, Decimal | None, Decimal | None, int | None]:
-    return (
-        config.stock_symbol,
-        config.lower_threshold,
-        config.upper_threshold,
-        config.telegram_update_offset,
+def config_snapshot(config: AlertConfig) -> tuple[tuple[Any, ...], ...]:
+    stock_items = tuple(
+        (symbol, monitor.lower_threshold, monitor.upper_threshold)
+        for symbol, monitor in sorted(config.stocks.items())
     )
+    return stock_items + (("telegram_update_offset", config.telegram_update_offset),)
 
 
 def effective_config(config: AlertConfig) -> AlertConfig:
-    symbol = env("STOCK_SYMBOL", config.stock_symbol)
+    symbol = env("STOCK_SYMBOL")
     lower = optional_decimal_from_env("LOWER_PRICE_THRESHOLD")
     if lower is None:
         lower = optional_decimal_from_env("PRICE_THRESHOLD")
     upper = optional_decimal_from_env("UPPER_PRICE_THRESHOLD")
 
+    if symbol is None and lower is None and upper is None:
+        return config
+
+    selected_symbol = normalize_symbol(symbol or "LCID")
+    existing = config.stocks.get(selected_symbol, StockMonitor(symbol=selected_symbol))
     return AlertConfig(
-        stock_symbol=(symbol or config.stock_symbol).upper(),
-        lower_threshold=lower if lower is not None else config.lower_threshold,
-        upper_threshold=upper if upper is not None else config.upper_threshold,
+        stocks={
+            selected_symbol: StockMonitor(
+                symbol=selected_symbol,
+                lower_threshold=lower if lower is not None else existing.lower_threshold,
+                upper_threshold=upper if upper is not None else existing.upper_threshold,
+            )
+        },
         telegram_update_offset=config.telegram_update_offset,
     )
 
 
-def find_alert(quote: Quote, config: AlertConfig) -> tuple[str, Decimal] | None:
-    if config.lower_threshold is not None and quote.price < config.lower_threshold:
-        return "below", config.lower_threshold
-    if config.upper_threshold is not None and quote.price > config.upper_threshold:
-        return "above", config.upper_threshold
+def find_alert(quote: Quote, monitor: StockMonitor) -> tuple[str, Decimal] | None:
+    if monitor.lower_threshold is not None and quote.price < monitor.lower_threshold:
+        return "below", monitor.lower_threshold
+    if monitor.upper_threshold is not None and quote.price > monitor.upper_threshold:
+        return "above", monitor.upper_threshold
     return None
 
 
 def validate_config(config: AlertConfig) -> None:
-    if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", config.stock_symbol):
-        raise SystemExit(f"Invalid STOCK_SYMBOL: {config.stock_symbol!r}")
-    if (
-        config.lower_threshold is not None
-        and config.upper_threshold is not None
-        and config.lower_threshold >= config.upper_threshold
-    ):
-        raise SystemExit("Lower trigger must be below upper trigger")
+    for symbol, monitor in config.stocks.items():
+        normalize_symbol(symbol)
+        if (
+            monitor.lower_threshold is not None
+            and monitor.upper_threshold is not None
+            and monitor.lower_threshold >= monitor.upper_threshold
+        ):
+            raise SystemExit(f"{symbol}: lower trigger must be below upper trigger")
+
+
+def check_stock_alerts(config: AlertConfig) -> tuple[list[str], list[str]]:
+    alert_messages: list[str] = []
+    log_lines: list[str] = []
+
+    if not config.stocks:
+        return [], ["No stocks are currently monitored."]
+
+    for symbol, monitor in sorted(config.stocks.items()):
+        try:
+            quote = fetch_quote(symbol)
+        except Exception as exc:
+            log_lines.append(f"{symbol}: quote error: {exc}")
+            continue
+
+        log_lines.append(
+            f"{quote.symbol} price is {quote.price} {quote.currency}; "
+            f"lower trigger is {monitor.lower_threshold}; "
+            f"upper trigger is {monitor.upper_threshold}; "
+            f"market state is {quote.market_state}."
+        )
+
+        alert = find_alert(quote, monitor)
+        if alert is not None:
+            direction, threshold = alert
+            alert_messages.append(build_alert_message(quote, direction, threshold))
+
+    return alert_messages, log_lines
 
 
 def main() -> int:
@@ -334,20 +563,15 @@ def main() -> int:
     config = effective_config(stored_config)
     validate_config(config)
 
-    quote = fetch_quote(config.stock_symbol)
-    print(
-        f"{quote.symbol} price is {quote.price} {quote.currency}; "
-        f"lower trigger is {config.lower_threshold}; upper trigger is {config.upper_threshold}; "
-        f"market state is {quote.market_state}."
-    )
+    alert_messages, log_lines = check_stock_alerts(config)
+    for line in log_lines:
+        print(line)
 
-    alert = find_alert(quote, config)
-    if alert is None:
+    if not alert_messages:
         print("No alert sent.")
         return 0
 
-    direction, threshold = alert
-    message = build_alert_message(quote, direction, threshold)
+    message = "\n\n".join(alert_messages)
     if dry_run:
         print("DRY_RUN enabled. Telegram message would be:")
         print(message)
@@ -359,7 +583,7 @@ def main() -> int:
         )
 
     send_telegram_message(token, chat_id, message)
-    print("Telegram alert sent.")
+    print(f"Telegram alert sent for {len(alert_messages)} stock(s).")
     return 0
 
 

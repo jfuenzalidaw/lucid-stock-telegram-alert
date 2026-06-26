@@ -1,6 +1,6 @@
 # Lucid Stock Telegram Alert
 
-This GitHub Actions bot checks Lucid Group stock (`LCID`) every five minutes and sends a Telegram message when the latest price is below the configured lower trigger or above the configured upper trigger.
+This GitHub Actions bot checks monitored stock tickers every five minutes and sends a Telegram message when a latest price is below its configured lower trigger or above its configured upper trigger.
 
 ## Setup
 
@@ -28,14 +28,20 @@ You can also run it manually from GitHub's **Actions** tab with **Run workflow**
 Send commands to `t.me/Stocks_jf_bot`. GitHub Actions checks for new commands every five minutes.
 
 ```text
-/setlower 4.50
-/setupper 8.00
-/clearlower
-/clearupper
+/add AAPL
+/add AAPL 150 220
+/remove AAPL
+/setlower LCID 4.50
+/setupper LCID 8.00
+/clearlower LCID
+/clearupper LCID
+/prices
 /status
 ```
 
-The default lower trigger is `$5`. The upper trigger is off until you configure it.
+The default monitored stock is `LCID` with a `$5` lower trigger. Upper triggers are off until you configure them.
+
+The bot validates new tickers by fetching a live quote before saving them. `/prices` and `/status` show current prices for the monitored stocks.
 
 ## Local test
 
