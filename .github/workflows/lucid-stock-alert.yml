@@ -25,6 +25,10 @@ on:
         description: "Manual-run polling cycles. Scheduled runs always use 10 cycles."
         required: false
         default: "1"
+      continue_monitoring:
+        description: "Dispatch the next monitoring run when this one finishes."
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -37,6 +41,8 @@ jobs:
   check-stock:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    env:
+      CONTINUE_MONITORING: ${{ github.event_name == 'schedule' && 'true' || inputs.continue_monitoring || 'false' }}
 
     steps:
       - name: Check out repository
@@ -76,3 +82,17 @@ jobs:
             git commit -m "Update stock alert settings"
             git push
           fi
+
+      - name: Dispatch next monitoring run
+        if: ${{ always() && env.CONTINUE_MONITORING == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_WORKFLOW_PAT }}
+        run: |
+          gh workflow run lucid-stock-alert.yml \
+            --ref main \
+            -f stock_symbol='' \
+            -f lower_price_threshold='' \
+            -f upper_price_threshold='' \
+            -f dry_run=false \
+            -f monitoring_cycles=10 \
+            -f continue_monitoring=true

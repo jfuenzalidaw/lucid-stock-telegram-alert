@@ -70,4 +70,4 @@ LOWER_PRICE_THRESHOLD=5
 UPPER_PRICE_THRESHOLD=
 ```
 
-GitHub scheduled workflows use a five-minute cron because that is GitHub Actions' shortest supported schedule interval. Each scheduled run performs 10 monitoring cycles with 30 seconds between cycles. Runs can still be delayed by GitHub, so this is best for lightweight alerts, not real-time trading automation.
+GitHub scheduled workflows use a five-minute cron because that is GitHub Actions' shortest supported schedule interval. Each scheduled run performs 10 monitoring cycles with 30 seconds between cycles. The workflow can also self-dispatch the next run with `continue_monitoring=true`, which keeps monitoring active even if GitHub's scheduled trigger is delayed. Runs can still be delayed by GitHub, so this is best for lightweight alerts, not real-time trading automation.
