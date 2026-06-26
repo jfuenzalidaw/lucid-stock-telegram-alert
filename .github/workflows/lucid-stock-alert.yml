@@ -4,6 +4,19 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      stock_symbol:
+        description: "Stock symbol to check"
+        required: false
+        default: "LCID"
+      price_threshold:
+        description: "Alert when the stock price is below this value"
+        required: false
+        default: "5"
+      dry_run:
+        description: "Check price without sending Telegram messages"
+        required: false
+        default: "false"
 
 jobs:
   check-stock:
@@ -23,6 +36,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          STOCK_SYMBOL: LCID
-          PRICE_THRESHOLD: "5"
+          STOCK_SYMBOL: ${{ inputs.stock_symbol || 'LCID' }}
+          PRICE_THRESHOLD: ${{ inputs.price_threshold || '5' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: python3 scripts/stock_alert.py

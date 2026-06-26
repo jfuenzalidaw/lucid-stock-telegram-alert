@@ -5,7 +5,7 @@ This GitHub Actions bot checks Lucid Group stock (`LCID`) every five minutes and
 ## Setup
 
 1. Create a Telegram bot with BotFather and copy the bot token.
-2. Send any message to your bot from the Telegram chat where you want alerts.
+2. Open your bot at `t.me/Stocks_jf_bot` and send `/start` from the Telegram chat where you want alerts.
 3. Find your chat id by opening:
 
    ```text
