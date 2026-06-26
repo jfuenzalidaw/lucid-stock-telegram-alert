@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from html import unescape
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -17,6 +18,13 @@ from typing import Any, Callable
 
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_KEY_STATISTICS_URL = "https://finance.yahoo.com/quote/{symbol}/key-statistics/"
+FINRA_SHORT_INTEREST_PARTITIONS_URL = (
+    "https://api.finra.org/partitions/group/otcMarket/name/consolidatedShortInterest"
+)
+FINRA_SHORT_INTEREST_DATA_URL = (
+    "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest"
+)
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/{method}"
 DEFAULT_CONFIG_PATH = "config/stock_alert.json"
 SYMBOL_PATTERN = re.compile(r"[A-Z0-9][A-Z0-9.-]{0,14}")
@@ -29,6 +37,18 @@ class Quote:
     currency: str
     market_state: str
     source: str
+
+
+@dataclass(frozen=True)
+class ShortInterest:
+    symbol: str
+    settlement_date: str
+    current_short_position: int
+    average_daily_volume: int | None
+    days_to_cover: Decimal | None
+    change_percent: Decimal | None
+    short_percent_of_float: Decimal | None = None
+    source: str = "FINRA short interest"
 
 
 @dataclass
@@ -79,18 +99,36 @@ def normalize_symbol(raw_symbol: str) -> str:
     return symbol
 
 
-def fetch_json(url: str, data: bytes | None = None) -> dict[str, Any]:
+def fetch_json(
+    url: str,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    request_headers = {
+        "User-Agent": "lcid-telegram-stock-alert/1.0",
+        "Accept": "application/json",
+    }
+    if data is not None:
+        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if headers is not None:
+        request_headers.update(headers)
+
     request = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "User-Agent": "lcid-telegram-stock-alert/1.0",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers=request_headers,
         method="POST" if data is not None else "GET",
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def post_json(url: str, payload: dict[str, Any]) -> Any:
+    return fetch_json(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
 
 
 def telegram_api(token: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -129,6 +167,117 @@ def fetch_quote(symbol: str) -> Quote:
         market_state=str(meta.get("marketState") or "UNKNOWN"),
         source="Yahoo Finance chart API",
     )
+
+
+def clean_html_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", "", value)
+    return unescape(text).strip()
+
+
+def decimal_from_value(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value).replace(",", "").replace("%", "").strip())
+    except InvalidOperation:
+        return None
+
+
+def int_from_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(Decimal(str(value).replace(",", "").strip()))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def fetch_short_interest_settlement_dates() -> list[str]:
+    payload = fetch_json(FINRA_SHORT_INTEREST_PARTITIONS_URL)
+    dates = []
+    for partition in payload.get("availablePartitions") or []:
+        values = partition.get("partitions") or []
+        if values:
+            dates.append(str(values[0]))
+    return sorted(dates, reverse=True)
+
+
+def fetch_short_percent_of_float(symbol: str) -> Decimal | None:
+    url = YAHOO_KEY_STATISTICS_URL.format(symbol=urllib.parse.quote(symbol))
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+
+    match = re.search(
+        r">\s*Short % of Float(?:\s*\([^)]*\))?.*?</td>\s*<td[^>]*>(.*?)</td>",
+        html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    value = clean_html_text(match.group(1))
+    if value.upper() in {"N/A", "--", ""}:
+        return None
+    return decimal_from_value(value)
+
+
+def fetch_short_interest(symbol: str) -> ShortInterest | None:
+    normalized_symbol = normalize_symbol(symbol)
+    for settlement_date in fetch_short_interest_settlement_dates():
+        rows = post_json(
+            FINRA_SHORT_INTEREST_DATA_URL,
+            {
+                "compareFilters": [
+                    {
+                        "compareType": "EQUAL",
+                        "fieldName": "settlementDate",
+                        "fieldValue": settlement_date,
+                    },
+                    {
+                        "compareType": "EQUAL",
+                        "fieldName": "symbolCode",
+                        "fieldValue": normalized_symbol,
+                    },
+                ],
+                "limit": 1,
+            },
+        )
+        if not rows:
+            continue
+
+        row = rows[0]
+        current_short_position = int_from_value(row.get("currentShortPositionQuantity"))
+        if current_short_position is None:
+            return None
+
+        short_percent_of_float = None
+        source = "FINRA short interest"
+        try:
+            short_percent_of_float = fetch_short_percent_of_float(normalized_symbol)
+        except Exception:
+            short_percent_of_float = None
+        if short_percent_of_float is not None:
+            source = f"{source}; Yahoo Finance key statistics"
+
+        return ShortInterest(
+            symbol=normalized_symbol,
+            settlement_date=str(row.get("settlementDate") or settlement_date),
+            current_short_position=current_short_position,
+            average_daily_volume=int_from_value(row.get("averageDailyVolumeQuantity")),
+            days_to_cover=decimal_from_value(row.get("daysToCoverQuantity")),
+            change_percent=decimal_from_value(row.get("changePercent")),
+            short_percent_of_float=short_percent_of_float,
+            source=source,
+        )
+
+    return None
 
 
 def send_telegram_message(token: str, chat_id: str, message: str) -> None:
@@ -257,15 +406,72 @@ def build_prices_message(
     return "\n".join(lines)
 
 
-def build_alert_message(quote: Quote, direction: str, threshold: Decimal) -> str:
+def format_share_count(value: int) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    return f"{value:,}"
+
+
+def format_percent(value: Decimal, include_sign: bool = False) -> str:
+    numeric_value = float(value)
+    sign = "+" if include_sign and numeric_value > 0 else ""
+    return f"{sign}{numeric_value:.2f}%"
+
+
+def format_optional_decimal(value: Decimal | None) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def build_short_interest_lines(short_interest: ShortInterest | None) -> list[str]:
+    if short_interest is None:
+        return ["Short interest: unavailable"]
+
+    lines = [
+        f"Short interest: {format_share_count(short_interest.current_short_position)} shares",
+    ]
+    if short_interest.short_percent_of_float is None:
+        lines.append("Short % of float: unavailable")
+    else:
+        lines.append(
+            f"Short % of float: approx. {format_percent(short_interest.short_percent_of_float)}"
+        )
+
+    if short_interest.change_percent is not None:
+        lines.append(
+            f"Change: {format_percent(short_interest.change_percent, include_sign=True)} "
+            "vs prior cycle"
+        )
+    if short_interest.days_to_cover is not None:
+        lines.append(f"Days to cover: {format_optional_decimal(short_interest.days_to_cover)}")
+
+    lines.append(f"Short interest date: {short_interest.settlement_date}")
+    return lines
+
+
+def build_alert_message(
+    quote: Quote,
+    direction: str,
+    threshold: Decimal,
+    short_interest: ShortInterest | None = None,
+) -> str:
     checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (
+    lines = [
         f"Stock alert: {quote.symbol} is {direction} {threshold} {quote.currency}\n"
-        f"Current price: {quote.price} {quote.currency}\n"
-        f"Market state: {quote.market_state}\n"
-        f"Checked at: {checked_at}\n"
-        f"Source: {quote.source}"
-    )
+        f"Current price: {quote.price} {quote.currency}",
+        f"Market state: {quote.market_state}",
+        *build_short_interest_lines(short_interest),
+        f"Checked at: {checked_at}",
+    ]
+    sources = quote.source
+    if short_interest is not None:
+        sources = f"{sources}; {short_interest.source}"
+    lines.append(f"Source: {sources}")
+    return "\n".join(lines)
 
 
 def normalize_command(text: str) -> tuple[str, str]:
@@ -544,7 +750,14 @@ def check_stock_alerts(config: AlertConfig) -> tuple[list[str], list[str]]:
         alert = find_alert(quote, monitor)
         if alert is not None:
             direction, threshold = alert
-            alert_messages.append(build_alert_message(quote, direction, threshold))
+            short_interest = None
+            try:
+                short_interest = fetch_short_interest(quote.symbol)
+            except Exception as exc:
+                log_lines.append(f"{quote.symbol}: short interest error: {exc}")
+            alert_messages.append(
+                build_alert_message(quote, direction, threshold, short_interest)
+            )
 
     return alert_messages, log_lines
 

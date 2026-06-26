@@ -18,6 +18,19 @@ def quote(symbol, price):
     )
 
 
+def short_interest(symbol="LCID"):
+    return stock_alert.ShortInterest(
+        symbol=symbol,
+        settlement_date="2026-06-15",
+        current_short_position=65865686,
+        average_daily_volume=15446111,
+        days_to_cover=Decimal("4.26"),
+        change_percent=Decimal("13.69"),
+        short_percent_of_float=Decimal("40.83"),
+        source="FINRA short interest; Yahoo Finance key statistics",
+    )
+
+
 class StockAlertTests(unittest.TestCase):
     def test_build_alert_message_contains_lower_trigger_details(self):
         message = stock_alert.build_alert_message(quote("LCID", "4.99"), "below", Decimal("5"))
@@ -32,6 +45,72 @@ class StockAlertTests(unittest.TestCase):
 
         self.assertIn("above 8 USD", message)
         self.assertIn("8.01 USD", message)
+
+    def test_build_alert_message_contains_short_interest_details(self):
+        message = stock_alert.build_alert_message(
+            quote("LCID", "4.99"),
+            "below",
+            Decimal("5"),
+            short_interest(),
+        )
+
+        self.assertIn("Short interest: 65.9M shares", message)
+        self.assertIn("Short % of float: approx. 40.83%", message)
+        self.assertIn("Change: +13.69% vs prior cycle", message)
+        self.assertIn("Days to cover: 4.26", message)
+        self.assertIn("Short interest date: 2026-06-15", message)
+        self.assertIn("FINRA short interest", message)
+        self.assertIn("Yahoo Finance key statistics", message)
+
+    def test_build_alert_message_marks_missing_short_interest_unavailable(self):
+        message = stock_alert.build_alert_message(quote("LCID", "4.99"), "below", Decimal("5"))
+
+        self.assertIn("Short interest: unavailable", message)
+
+    def test_fetch_short_interest_combines_finra_and_float_percentage(self):
+        finra_rows = [
+            {
+                "currentShortPositionQuantity": 65865686,
+                "averageDailyVolumeQuantity": 15446111,
+                "daysToCoverQuantity": 4.26,
+                "changePercent": 13.69,
+                "settlementDate": "2026-06-15",
+            }
+        ]
+
+        with mock.patch.object(
+            stock_alert, "fetch_short_interest_settlement_dates", return_value=["2026-06-15"]
+        ):
+            with mock.patch.object(stock_alert, "post_json", return_value=finra_rows) as post:
+                with mock.patch.object(
+                    stock_alert, "fetch_short_percent_of_float", return_value=Decimal("40.83")
+                ):
+                    result = stock_alert.fetch_short_interest("LCID")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.current_short_position, 65865686)
+        self.assertEqual(result.average_daily_volume, 15446111)
+        self.assertEqual(result.days_to_cover, Decimal("4.26"))
+        self.assertEqual(result.change_percent, Decimal("13.69"))
+        self.assertEqual(result.short_percent_of_float, Decimal("40.83"))
+        self.assertEqual(result.settlement_date, "2026-06-15")
+        post.assert_called_once()
+
+    def test_check_stock_alerts_keeps_alert_when_short_interest_lookup_fails(self):
+        config = stock_alert.AlertConfig(
+            stocks={"LCID": stock_alert.StockMonitor(symbol="LCID", lower_threshold=Decimal("5"))}
+        )
+
+        with mock.patch.object(stock_alert, "fetch_quote", return_value=quote("LCID", "4.99")):
+            with mock.patch.object(
+                stock_alert, "fetch_short_interest", side_effect=RuntimeError("provider down")
+            ):
+                alert_messages, log_lines = stock_alert.check_stock_alerts(config)
+
+        self.assertEqual(len(alert_messages), 1)
+        self.assertIn("Short interest: unavailable", alert_messages[0])
+        self.assertIn("LCID: short interest error: provider down", log_lines)
 
     def test_add_command_validates_quote_and_adds_stock(self):
         config = stock_alert.AlertConfig(stocks={})
@@ -188,13 +267,19 @@ class StockAlertTests(unittest.TestCase):
             ):
                 with mock.patch.object(stock_alert, "process_telegram_commands", return_value=False):
                     with mock.patch.object(stock_alert, "fetch_quote", side_effect=fake_fetch):
-                        with mock.patch.object(stock_alert, "send_telegram_message") as send:
-                            self.assertEqual(stock_alert.main(), 0)
+                        with mock.patch.object(
+                            stock_alert,
+                            "fetch_short_interest",
+                            side_effect=lambda symbol: short_interest(symbol),
+                        ):
+                            with mock.patch.object(stock_alert, "send_telegram_message") as send:
+                                self.assertEqual(stock_alert.main(), 0)
 
         send.assert_called_once()
         message = send.call_args.args[2]
         self.assertIn("LCID is below", message)
         self.assertIn("AAPL is above", message)
+        self.assertIn("Short % of float: approx. 40.83%", message)
 
 
 if __name__ == "__main__":
