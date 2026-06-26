@@ -19,7 +19,11 @@ Credential model:
 - GitHub repo example: `jfuenzalidaw/lucid-stock-telegram-alert`
 - GitHub Actions runner: `ubuntu-latest`
 - Telegram bot username example: `@Stocks_jf_bot`
-- Required GitHub Actions Secrets:
+- Prefer bot-specific GitHub Actions Secrets:
+  - `STOCKS_TELEGRAM_BOT_TOKEN`
+  - `STOCKS_TELEGRAM_CHAT_ID`
+  - `STOCKS_GH_WORKFLOW_PAT`
+- Legacy fallback secret names used by the stock bot:
   - `TELEGRAM_BOT_TOKEN`
   - `TELEGRAM_CHAT_ID`
   - `GH_WORKFLOW_PAT`

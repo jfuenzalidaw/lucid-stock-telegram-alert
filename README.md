@@ -15,9 +15,12 @@ This GitHub Actions bot checks monitored stock tickers every 30 seconds while it
 4. In your GitHub repository, add these repository secrets:
 
    ```text
-   TELEGRAM_BOT_TOKEN
-   TELEGRAM_CHAT_ID
+   STOCKS_TELEGRAM_BOT_TOKEN
+   STOCKS_TELEGRAM_CHAT_ID
+   STOCKS_GH_WORKFLOW_PAT
    ```
+
+   The workflow still falls back to the legacy names `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `GH_WORKFLOW_PAT` if the stock-specific secrets are not set.
 
 5. Push this repository to GitHub. The workflow is in `.github/workflows/lucid-stock-alert.yml`.
 

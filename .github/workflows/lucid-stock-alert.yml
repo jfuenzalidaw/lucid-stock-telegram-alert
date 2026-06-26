@@ -55,8 +55,8 @@ jobs:
 
       - name: Check stock prices and send Telegram alerts
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.STOCKS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.STOCKS_TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
           CONFIG_PATH: config/stock_alert.json
           STOCK_SYMBOL: ${{ inputs.stock_symbol || '' }}
           LOWER_PRICE_THRESHOLD: ${{ inputs.lower_price_threshold || '' }}
@@ -86,7 +86,7 @@ jobs:
       - name: Dispatch next monitoring run
         if: ${{ always() && env.CONTINUE_MONITORING == 'true' }}
         env:
-          GH_TOKEN: ${{ secrets.GH_WORKFLOW_PAT }}
+          GH_TOKEN: ${{ secrets.STOCKS_GH_WORKFLOW_PAT || secrets.GH_WORKFLOW_PAT }}
         run: |
           gh workflow run lucid-stock-alert.yml \
             --ref main \
