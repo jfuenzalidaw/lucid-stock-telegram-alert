@@ -1,4 +1,7 @@
 {
+  "short_interest_summary_dates": {
+    "LCID": "2026-06-15"
+  },
   "stocks": {
     "LCID": {
       "lower_threshold": "5.1",
