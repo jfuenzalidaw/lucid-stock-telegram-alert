@@ -1,6 +1,6 @@
 # Lucid Stock Telegram Alert
 
-This GitHub Actions bot checks Lucid Group stock (`LCID`) every five minutes and sends a Telegram message when the latest price is below `$5`.
+This GitHub Actions bot checks Lucid Group stock (`LCID`) every five minutes and sends a Telegram message when the latest price is below the configured lower trigger or above the configured upper trigger.
 
 ## Setup
 
@@ -22,6 +22,20 @@ This GitHub Actions bot checks Lucid Group stock (`LCID`) every five minutes and
 5. Push this repository to GitHub. The workflow is in `.github/workflows/lucid-stock-alert.yml`.
 
 You can also run it manually from GitHub's **Actions** tab with **Run workflow**.
+
+## Telegram commands
+
+Send commands to `t.me/Stocks_jf_bot`. GitHub Actions checks for new commands every five minutes.
+
+```text
+/setlower 4.50
+/setupper 8.00
+/clearlower
+/clearupper
+/status
+```
+
+The default lower trigger is `$5`. The upper trigger is off until you configure it.
 
 ## Local test
 
@@ -46,7 +60,8 @@ The defaults are:
 
 ```text
 STOCK_SYMBOL=LCID
-PRICE_THRESHOLD=5
+LOWER_PRICE_THRESHOLD=5
+UPPER_PRICE_THRESHOLD=
 ```
 
 GitHub scheduled workflows use a five-minute cron because that is GitHub Actions' shortest supported schedule interval. Runs can be delayed by GitHub, so this is best for lightweight alerts, not real-time trading automation.

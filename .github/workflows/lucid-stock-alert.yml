@@ -9,14 +9,25 @@ on:
         description: "Stock symbol to check"
         required: false
         default: "LCID"
-      price_threshold:
+      lower_price_threshold:
         description: "Alert when the stock price is below this value"
         required: false
-        default: "5"
+        default: ""
+      upper_price_threshold:
+        description: "Alert when the stock price is above this value"
+        required: false
+        default: ""
       dry_run:
         description: "Check price without sending Telegram messages"
         required: false
         default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lucid-stock-alert
+  cancel-in-progress: false
 
 jobs:
   check-stock:
@@ -36,7 +47,19 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CONFIG_PATH: config/stock_alert.json
           STOCK_SYMBOL: ${{ inputs.stock_symbol || 'LCID' }}
-          PRICE_THRESHOLD: ${{ inputs.price_threshold || '5' }}
+          LOWER_PRICE_THRESHOLD: ${{ inputs.lower_price_threshold || '' }}
+          UPPER_PRICE_THRESHOLD: ${{ inputs.upper_price_threshold || '' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: python3 scripts/stock_alert.py
+
+      - name: Persist Telegram command settings
+        run: |
+          if ! git diff --quiet -- config/stock_alert.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add config/stock_alert.json
+            git commit -m "Update stock alert settings"
+            git push
+          fi
