@@ -67,6 +67,71 @@ class StockAlertTests(unittest.TestCase):
 
         self.assertIn("Short interest: unavailable", message)
 
+    def test_shortinterest_command_returns_all_monitored_stocks(self):
+        config = stock_alert.AlertConfig(
+            stocks={
+                "LCID": stock_alert.StockMonitor(symbol="LCID"),
+                "AAPL": stock_alert.StockMonitor(symbol="AAPL"),
+            }
+        )
+
+        with mock.patch.object(
+            stock_alert, "fetch_short_interest", side_effect=lambda symbol: short_interest(symbol)
+        ):
+            reply = stock_alert.update_config_from_command(config, "/shortinterest")
+
+        self.assertIn("Short interest summary:", reply)
+        self.assertIn("AAPL:", reply)
+        self.assertIn("LCID:", reply)
+        self.assertIn("Short % of float: approx. 40.83%", reply)
+
+    def test_build_short_interest_summary_only_includes_new_values(self):
+        config = stock_alert.AlertConfig(
+            stocks={
+                "LCID": stock_alert.StockMonitor(symbol="LCID"),
+                "AAPL": stock_alert.StockMonitor(symbol="AAPL"),
+            },
+            short_interest_summary_dates={"LCID": "2026-06-15"},
+        )
+
+        message, updates, log_lines = stock_alert.build_short_interest_summary_message(
+            config,
+            short_interest_fetcher=lambda symbol: short_interest(symbol),
+            only_new=True,
+        )
+
+        self.assertIsNotNone(message)
+        assert message is not None
+        self.assertIn("New short interest summary:", message)
+        self.assertIn("AAPL:", message)
+        self.assertNotIn("LCID:", message)
+        self.assertEqual(updates, {"AAPL": "2026-06-15"})
+        self.assertEqual(log_lines, [])
+
+    def test_build_short_interest_summary_skips_older_values(self):
+        config = stock_alert.AlertConfig(
+            stocks={"LCID": stock_alert.StockMonitor(symbol="LCID")},
+            short_interest_summary_dates={"LCID": "2026-06-15"},
+        )
+        older_short_interest = stock_alert.ShortInterest(
+            symbol="LCID",
+            settlement_date="2026-05-29",
+            current_short_position=57936413,
+            average_daily_volume=13605957,
+            days_to_cover=Decimal("4.26"),
+            change_percent=Decimal("-5.25"),
+            short_percent_of_float=None,
+        )
+
+        message, updates, _ = stock_alert.build_short_interest_summary_message(
+            config,
+            short_interest_fetcher=lambda symbol: older_short_interest,
+            only_new=True,
+        )
+
+        self.assertIsNone(message)
+        self.assertEqual(updates, {})
+
     def test_fetch_short_interest_combines_finra_and_float_percentage(self):
         finra_rows = [
             {
@@ -227,6 +292,19 @@ class StockAlertTests(unittest.TestCase):
         self.assertEqual(config.stocks["LCID"].lower_threshold, Decimal("5"))
         self.assertEqual(config.telegram_update_offset, 123)
 
+    def test_load_and_save_config_preserves_short_interest_summary_dates(self):
+        config = stock_alert.AlertConfig(
+            stocks={"LCID": stock_alert.StockMonitor(symbol="LCID")},
+            short_interest_summary_dates={"LCID": "2026-06-15", "AAPL": "2026-05-29"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "stock_alert.json"
+            stock_alert.save_config(config_path, config)
+            loaded = stock_alert.load_config(config_path)
+
+        self.assertEqual(loaded.short_interest_summary_dates, {"LCID": "2026-06-15"})
+
     def test_main_does_not_require_telegram_secrets_when_prices_are_in_range(self):
         config = stock_alert.AlertConfig(
             stocks={"LCID": stock_alert.StockMonitor(symbol="LCID", lower_threshold=Decimal("5"))}
@@ -280,6 +358,56 @@ class StockAlertTests(unittest.TestCase):
         self.assertIn("LCID is below", message)
         self.assertIn("AAPL is above", message)
         self.assertIn("Short % of float: approx. 40.83%", message)
+
+    def test_main_sends_short_interest_summary_once_for_new_values(self):
+        config = stock_alert.AlertConfig(
+            stocks={"LCID": stock_alert.StockMonitor(symbol="LCID", lower_threshold=Decimal("5"))}
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "stock_alert.json"
+            stock_alert.save_config(config_path, config)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CONFIG_PATH": str(config_path),
+                    "TELEGRAM_BOT_TOKEN": "token",
+                    "TELEGRAM_CHAT_ID": "chat",
+                },
+                clear=True,
+            ):
+                with mock.patch.object(stock_alert, "process_telegram_commands", return_value=False):
+                    with mock.patch.object(stock_alert, "fetch_quote", return_value=quote("LCID", "5.01")):
+                        with mock.patch.object(
+                            stock_alert, "fetch_short_interest", return_value=short_interest()
+                        ):
+                            with mock.patch.object(stock_alert, "send_telegram_message") as send:
+                                self.assertEqual(stock_alert.main(), 0)
+
+            send.assert_called_once()
+            message = send.call_args.args[2]
+            self.assertIn("New short interest summary:", message)
+            loaded = stock_alert.load_config(config_path)
+            self.assertEqual(loaded.short_interest_summary_dates, {"LCID": "2026-06-15"})
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CONFIG_PATH": str(config_path),
+                    "TELEGRAM_BOT_TOKEN": "token",
+                    "TELEGRAM_CHAT_ID": "chat",
+                },
+                clear=True,
+            ):
+                with mock.patch.object(stock_alert, "process_telegram_commands", return_value=False):
+                    with mock.patch.object(stock_alert, "fetch_quote", return_value=quote("LCID", "5.01")):
+                        with mock.patch.object(
+                            stock_alert, "fetch_short_interest", return_value=short_interest()
+                        ):
+                            with mock.patch.object(stock_alert, "send_telegram_message") as send_again:
+                                self.assertEqual(stock_alert.main(), 0)
+
+            send_again.assert_not_called()
 
 
 if __name__ == "__main__":

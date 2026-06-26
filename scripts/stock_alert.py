@@ -66,6 +66,7 @@ class AlertConfig:
         }
     )
     telegram_update_offset: int | None = None
+    short_interest_summary_dates: dict[str, str] = field(default_factory=dict)
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -312,8 +313,14 @@ def load_config(path: Path) -> AlertConfig:
                 )
             },
             telegram_update_offset=update_offset,
+            short_interest_summary_dates={},
         )
 
+    summary_dates = {
+        normalize_symbol(str(symbol)): str(date)
+        for symbol, date in dict(data.get("short_interest_summary_dates") or {}).items()
+        if date is not None
+    }
     stocks: dict[str, StockMonitor] = {}
     for raw_symbol, raw_monitor in dict(data.get("stocks") or {}).items():
         symbol = normalize_symbol(str(raw_symbol))
@@ -325,7 +332,11 @@ def load_config(path: Path) -> AlertConfig:
             upper_threshold=Decimal(str(upper)) if upper is not None else None,
         )
 
-    return AlertConfig(stocks=stocks, telegram_update_offset=update_offset)
+    return AlertConfig(
+        stocks=stocks,
+        telegram_update_offset=update_offset,
+        short_interest_summary_dates=summary_dates,
+    )
 
 
 def save_config(path: Path, config: AlertConfig) -> None:
@@ -341,6 +352,11 @@ def save_config(path: Path, config: AlertConfig) -> None:
                 ),
             }
             for symbol, monitor in sorted(config.stocks.items())
+        },
+        "short_interest_summary_dates": {
+            symbol: date
+            for symbol, date in sorted(config.short_interest_summary_dates.items())
+            if symbol in config.stocks
         },
         "telegram_update_offset": config.telegram_update_offset,
     }
@@ -400,6 +416,7 @@ def build_prices_message(
                 "/setlower AAPL 150",
                 "/setupper AAPL 220",
                 "/prices",
+                "/shortinterest",
                 "/status",
             ]
         )
@@ -451,6 +468,50 @@ def build_short_interest_lines(short_interest: ShortInterest | None) -> list[str
 
     lines.append(f"Short interest date: {short_interest.settlement_date}")
     return lines
+
+
+def build_short_interest_summary_message(
+    config: AlertConfig,
+    short_interest_fetcher: Callable[[str], ShortInterest | None] | None = None,
+    only_new: bool = False,
+) -> tuple[str | None, dict[str, str], list[str]]:
+    if not config.stocks:
+        return "No stocks are currently monitored. Use /add LCID to add one.", {}, []
+
+    if short_interest_fetcher is None:
+        short_interest_fetcher = fetch_short_interest
+
+    new_summary_dates: dict[str, str] = {}
+    log_lines: list[str] = []
+    sections: list[str] = []
+
+    for symbol in sorted(config.stocks):
+        try:
+            short_interest = short_interest_fetcher(symbol)
+        except Exception as exc:
+            log_lines.append(f"{symbol}: short interest error: {exc}")
+            if not only_new:
+                sections.append(f"{symbol}:\nShort interest: unavailable")
+            continue
+
+        if short_interest is None:
+            log_lines.append(f"{symbol}: short interest unavailable")
+            if not only_new:
+                sections.append(f"{symbol}:\nShort interest: unavailable")
+            continue
+
+        previous_summary_date = config.short_interest_summary_dates.get(symbol)
+        if only_new and previous_summary_date and short_interest.settlement_date <= previous_summary_date:
+            continue
+
+        sections.append("\n".join([f"{symbol}:", *build_short_interest_lines(short_interest)]))
+        new_summary_dates[symbol] = short_interest.settlement_date
+
+    if not sections:
+        return None, {}, log_lines
+
+    title = "New short interest summary:" if only_new else "Short interest summary:"
+    return "\n\n".join([title, *sections]), new_summary_dates, log_lines
 
 
 def build_alert_message(
@@ -555,6 +616,12 @@ def update_config_from_command(
 
     if command == "/prices":
         return build_prices_message(config, quote_fetcher)
+
+    if command in {"/shortinterest", "/short", "/si"}:
+        message, _, log_lines = build_short_interest_summary_message(config)
+        for line in log_lines:
+            print(line)
+        return message or "Short interest data is unavailable for the monitored stocks."
 
     if command in {"/add", "/addstock"}:
         parsed = parse_add_args(arg)
@@ -680,7 +747,11 @@ def config_snapshot(config: AlertConfig) -> tuple[tuple[Any, ...], ...]:
         (symbol, monitor.lower_threshold, monitor.upper_threshold)
         for symbol, monitor in sorted(config.stocks.items())
     )
-    return stock_items + (("telegram_update_offset", config.telegram_update_offset),)
+    summary_items = tuple(
+        ("short_interest_summary_date", symbol, date)
+        for symbol, date in sorted(config.short_interest_summary_dates.items())
+    )
+    return stock_items + summary_items + (("telegram_update_offset", config.telegram_update_offset),)
 
 
 def effective_config(config: AlertConfig) -> AlertConfig:
@@ -704,6 +775,7 @@ def effective_config(config: AlertConfig) -> AlertConfig:
             )
         },
         telegram_update_offset=config.telegram_update_offset,
+        short_interest_summary_dates=config.short_interest_summary_dates,
     )
 
 
@@ -780,11 +852,24 @@ def main() -> int:
     for line in log_lines:
         print(line)
 
-    if not alert_messages:
-        print("No alert sent.")
+    short_interest_message = None
+    short_interest_updates: dict[str, str] = {}
+    if token and chat_id:
+        short_interest_message, short_interest_updates, short_interest_log_lines = (
+            build_short_interest_summary_message(stored_config, only_new=True)
+        )
+        for line in short_interest_log_lines:
+            print(line)
+
+    telegram_messages = [*alert_messages]
+    if short_interest_message is not None:
+        telegram_messages.append(short_interest_message)
+
+    if not telegram_messages:
+        print("No Telegram message sent.")
         return 0
 
-    message = "\n\n".join(alert_messages)
+    message = "\n\n".join(telegram_messages)
     if dry_run:
         print("DRY_RUN enabled. Telegram message would be:")
         print(message)
@@ -796,7 +881,10 @@ def main() -> int:
         )
 
     send_telegram_message(token, chat_id, message)
-    print(f"Telegram alert sent for {len(alert_messages)} stock(s).")
+    if short_interest_updates:
+        stored_config.short_interest_summary_dates.update(short_interest_updates)
+        save_config(config_path, stored_config)
+    print(f"Telegram message sent with {len(telegram_messages)} section(s).")
     return 0
 
 
