@@ -2,8 +2,8 @@
   "stocks": {
     "LCID": {
       "lower_threshold": "5",
-      "upper_threshold": null
+      "upper_threshold": "5.4"
     }
   },
-  "telegram_update_offset": 199384891
+  "telegram_update_offset": 199384892
 }
