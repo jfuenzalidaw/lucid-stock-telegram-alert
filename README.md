@@ -1,6 +1,6 @@
 # Lucid Stock Telegram Alert
 
-This GitHub Actions bot checks monitored stock tickers every 30 seconds while its scheduled GitHub Actions run is active, and sends a Telegram message when a latest price is below its configured lower trigger or above its configured upper trigger. Triggered alerts include FINRA short interest data and, when available, an approximate short percentage of float from Yahoo Finance key statistics.
+This GitHub Actions bot checks monitored stock tickers every 30 seconds while its scheduled GitHub Actions run is active, and sends a Telegram message when a latest price is below its configured lower trigger or above its configured upper trigger. Triggered alerts include FINRA short interest data and, when available, an approximate short percentage of float from Yahoo Finance key statistics. The bot also sends a short interest summary once for each newly published FINRA settlement date for the monitored stocks.
 
 ## Setup
 
@@ -39,12 +39,13 @@ Send commands to `t.me/Stocks_jf_bot`. GitHub Actions checks for new commands ev
 /clearlower LCID
 /clearupper LCID
 /prices
+/shortinterest
 /status
 ```
 
 The default monitored stock is `LCID` with a `$5` lower trigger. Upper triggers are off until you configure them.
 
-The bot validates new tickers by fetching a live quote before saving them. `/prices` and `/status` show current prices for the monitored stocks.
+The bot validates new tickers by fetching a live quote before saving them. `/prices` and `/status` show current prices for the monitored stocks. `/shortinterest` shows the latest short interest data for all monitored stocks.
 
 ## Local test
 
