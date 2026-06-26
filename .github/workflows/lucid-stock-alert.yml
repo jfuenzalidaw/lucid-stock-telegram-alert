@@ -34,7 +34,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: lucid-stock-alert
+  group: lucid-stock-alert-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
