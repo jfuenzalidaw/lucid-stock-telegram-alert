@@ -1,12 +1,12 @@
 {
   "short_interest_summary_dates": {
-    "LCID": "2026-06-30"
+    "EDV": "2026-06-30"
   },
   "stocks": {
-    "LCID": {
-      "lower_threshold": "2",
-      "upper_threshold": "7"
+    "EDV": {
+      "lower_threshold": null,
+      "upper_threshold": "65"
     }
   },
-  "telegram_update_offset": 199384921
+  "telegram_update_offset": 199384925
 }
