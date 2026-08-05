@@ -838,9 +838,23 @@ def main() -> int:
     dry_run = env("DRY_RUN", "false").lower() in {"1", "true", "yes"}
     token = env("TELEGRAM_BOT_TOKEN")
     chat_id = env("TELEGRAM_CHAT_ID")
+    outbound_message = env("OUTBOUND_MESSAGE", "").strip()
     config_path = Path(env("CONFIG_PATH", DEFAULT_CONFIG_PATH) or DEFAULT_CONFIG_PATH)
 
     stored_config = load_config(config_path)
+    if outbound_message:
+        if dry_run:
+            print("DRY_RUN enabled. Telegram message would be:")
+            print(outbound_message)
+            return 0
+        if not token or not chat_id:
+            raise SystemExit(
+                "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required for an outbound message."
+            )
+        send_telegram_message(token, chat_id, outbound_message)
+        print("Outbound Telegram message sent.")
+        return 0
+
     if token and chat_id:
         if process_telegram_commands(token, chat_id, stored_config, dry_run):
             save_config(config_path, stored_config)
